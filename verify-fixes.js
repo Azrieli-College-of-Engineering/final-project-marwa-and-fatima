@@ -10,11 +10,19 @@
 const http = require('http');
 
 const TARGET = 'localhost';
-const PORT = 3001;
+const PORT = 3002;
 
 function request(method, path, body = null) {
   return new Promise((resolve, reject) => {
-    const payload = body ? JSON.stringify(body) : null;
+    let payload;
+    
+    // If body has special marker, construct raw JSON with __proto__/__constructor__
+    if (body && body.__RAW_JSON) {
+      payload = body.__RAW_JSON;
+    } else {
+      payload = body ? JSON.stringify(body) : null;
+    }
+    
     const options = {
       hostname: TARGET,
       port: PORT,
@@ -62,8 +70,7 @@ async function main() {
   // Test 1: __proto__ key is blocked
   console.log('── Test 1: __proto__ Privilege Escalation ──────────────');
   const t1a = await request('POST', '/api/update-profile', {
-    username: 'alice',
-    updates: { '__proto__': { isAdmin: true } }
+    __RAW_JSON: '{"username":"alice","updates":{"__proto__":{"isAdmin":true}}}'
   });
   total++;
   if (check('Input with __proto__ key rejected (400)', t1a.status === 400)) passed++;
@@ -84,7 +91,7 @@ async function main() {
   // Test 3: DoS payload blocked
   console.log('\n── Test 3: Denial of Service (timeout type pollution) ──');
   const t3a = await request('POST', '/api/settings', {
-    '__proto__': { timeout: 'CORRUPTED' }
+    __RAW_JSON: '{"__proto__":{"timeout":"CORRUPTED"}}'
   });
   total++;
   if (check('DoS payload rejected', t3a.status === 400)) passed++;
@@ -96,8 +103,7 @@ async function main() {
   // Test 4: RCE payload blocked
   console.log('\n── Test 4: RCE Simulation ───────────────────────────────');
   const t4 = await request('POST', '/api/update-profile', {
-    username: 'bob',
-    updates: { '__proto__': { dangerousOption: "require('child_process').execSync('id')" } }
+    __RAW_JSON: '{"username":"bob","updates":{"__proto__":{"dangerousOption":"require(\'child_process\').execSync(\'id\')"}}}'
   });
   total++;
   if (check('RCE payload via __proto__ blocked', t4.status === 400)) passed++;

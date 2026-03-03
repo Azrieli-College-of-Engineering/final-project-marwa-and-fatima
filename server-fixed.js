@@ -17,7 +17,38 @@
 
 const express = require('express');
 const app = express();
-app.use(express.json());
+
+// DEFENSE: Custom body parser that checks raw bytes for dangerous keys
+app.use((req, res, next) => {
+  if (req.is('application/json')) {
+    let rawBody = '';
+    let hasDangerousKey = false;
+    req.setEncoding('utf8');
+    req.on('data', chunk => {
+      rawBody += chunk;
+      // Check as we read to detect "__proto__", "constructor", "prototype" with quotes
+      if (!hasDangerousKey && /"__proto__"|"constructor"|"prototype"/.test(chunk)) {
+        console.warn(`[SECURITY] Detected dangerous key in streaming JSON request: ${chunk.substring(0, 100)}`);
+        hasDangerousKey = true;
+      }
+    });
+    req.on('end', () => {
+      console.log(`[DEBUG middleware] Raw body: ${rawBody.substring(0, 150)}`);
+      if (hasDangerousKey) {
+        console.log('[DEBUG middleware] Rejecting due to dangerous key');
+        return res.status(400).json({error: 'Invalid input', details: ['Forbidden key: "__proto__", "constructor", or "prototype" detected']});
+      }
+      try {
+        req.body = JSON.parse(rawBody);
+        next();
+      } catch (e) {
+        res.status(400).json({error: 'Invalid JSON'});
+      }
+    });
+  } else {
+    express.json()(req, res, next);
+  }
+});
 
 // -------------------------------------------------------
 // DEFENSE 3: Freeze Object.prototype at startup
@@ -31,7 +62,22 @@ console.log('[SECURITY] Object.prototype is now frozen.');
 //   - Uses Object.keys() → does NOT traverse prototype chain
 //   - Explicitly blocks dangerous keys
 // -------------------------------------------------------
+
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+// Recursively check for dangerous keys at any depth
+function containsDangerousKey(obj) {
+  if (typeof obj !== 'object' || obj === null) return false;
+  
+  // Check both enumerable (Object.keys) and non-enumerable (Object.getOwnPropertyNames) properties
+  const allKeys = Object.getOwnPropertyNames(obj);
+  for (const key of allKeys) {
+    console.log(`[DEBUG containsDangerousKey] Checking key: "${key}", DANGEROUS_KEYS has it: ${DANGEROUS_KEYS.has(key)}`);
+    if (DANGEROUS_KEYS.has(key)) return true;
+    if (typeof obj[key] === 'object' && containsDangerousKey(obj[key])) return true;
+  }
+  return false;
+}
 
 function safeMerge(target, source) {
   // Object.keys() only returns own enumerable properties — never __proto__
@@ -67,19 +113,50 @@ function validateProfileUpdates(updates) {
   const ALLOWED_KEYS = new Set(['displayName', 'email', 'bio', 'avatar']);
   const errors = [];
 
+  console.log(`[DEBUG validateProfileUpdates] updates keys: ${JSON.stringify(Object.keys(updates || {}))}`);
+  console.log(`[DEBUG validateProfileUpdates] updates: ${JSON.stringify(updates)}`);
+  
+  // Check if the updates object itself has been polluted (prototype has been modified)
+  if (updates && Object.getPrototypeOf(updates) !== Object.prototype) {
+    errors.push('Forbidden key: "__proto__" attack detected - prototype has been modified');
+    console.log('[DEBUG validateProfileUpdates] Prototype pollution detected!');
+    return errors;
+  }
+
+  if (containsDangerousKey(updates)) {
+    errors.push('Forbidden key: "__proto__", "constructor", or "prototype" detected');
+    console.log('[DEBUG validateProfileUpdates] Dangerous key found!');
+    return errors;
+  }
+
   for (const key of Object.keys(updates || {})) {
-    if (DANGEROUS_KEYS.has(key)) {
-      errors.push(`Forbidden key: "${key}"`);
-    } else if (!ALLOWED_KEYS.has(key)) {
+    if (!ALLOWED_KEYS.has(key)) {
       errors.push(`Unknown key: "${key}" — only allowed: ${[...ALLOWED_KEYS].join(', ')}`);
     }
   }
 
+  console.log(`[DEBUG validateProfileUpdates] errors: ${JSON.stringify(errors)}`);
   return errors;
 }
 
 function validateSettings(settings) {
   const errors = [];
+
+  console.log(`[DEBUG validateSettings] settings keys: ${JSON.stringify(Object.keys(settings || {}))}`);
+  console.log(`[DEBUG validateSettings] settings all properties: ${JSON.stringify(Object.getOwnPropertyNames(settings || {}))}`);
+
+  // Check if the settings object itself has been polluted (prototype has been modified)
+  if (settings && Object.getPrototypeOf(settings) !== Object.prototype) {
+    errors.push('Forbidden key: "__proto__" attack detected - prototype has been modified');
+    console.log('[DEBUG validateSettings] Prototype pollution detected!');
+    return errors;
+  }
+
+  if (containsDangerousKey(settings)) {
+    errors.push('Forbidden key: "__proto__", "constructor", or "prototype" detected');
+    return errors;
+  }
+
   if (settings.timeout !== undefined && typeof settings.timeout !== 'number') {
     errors.push(`"timeout" must be a number, got: ${typeof settings.timeout}`);
   }
@@ -113,6 +190,8 @@ app.post('/api/update-profile', (req, res) => {
   if (!username || !users[username]) {
     return res.status(404).json({ error: 'User not found' });
   }
+
+  console.log('[DEBUG] updates received:', Object.keys(updates || {}));
 
   // DEFENSE 5: Validate input before merging
   const errors = validateProfileUpdates(updates);
@@ -195,8 +274,12 @@ app.get('/', (req, res) => {
   });
 });
 
-const PORT = 3001;
-app.listen(PORT, () => {
+const PORT = 3002;
+app.listen(PORT, (err) => {
+  if (err) {
+    console.error('❌ Failed to start the server:', err);
+    process.exit(1);
+  }
   console.log('');
   console.log('╔══════════════════════════════════════════════════════╗');
   console.log('║   ✅  SECURE SERVER RUNNING                          ║');
